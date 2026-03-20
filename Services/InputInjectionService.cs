@@ -5,9 +5,6 @@ namespace WhisperNow.Services;
 
 internal static class InputInjectionService
 {
-    /// <summary>
-    /// Clears the clipboard so a stale result can't be pasted while Whisper runs.
-    /// </summary>
     public static void ClearClipboard()
     {
         if (NativeMethods.OpenClipboard(IntPtr.Zero))
@@ -21,12 +18,29 @@ internal static class InputInjectionService
     {
         SetClipboardText(text);
 
-        if (targetWindow != IntPtr.Zero)
-            NativeMethods.SetForegroundWindow(targetWindow);
+        var currentFg = NativeMethods.GetForegroundWindow();
+        Log.Info($"Paste: target=0x{targetWindow:X}, currentFg=0x{currentFg:X}, same={currentFg == targetWindow}");
+
+        if (targetWindow != IntPtr.Zero && currentFg != targetWindow)
+        {
+            bool ok = NativeMethods.SetForegroundWindow(targetWindow);
+            Log.Info($"SetForegroundWindow={ok}");
+            Thread.Sleep(50);
+        }
 
         ReleaseModifiers();
         Thread.Sleep(40);
-        SimulateCtrlV();
+
+        // Try Ctrl+V via SendInput
+        uint sent = SimulateCtrlV();
+        Log.Info($"SendInput returned {sent} (expected 4)");
+
+        // If SendInput didn't inject all 4 events, fall back to keybd_event
+        if (sent < 4)
+        {
+            Log.Info("Falling back to keybd_event");
+            KeybdCtrlV();
+        }
     }
 
     private static void SetClipboardText(string text)
@@ -59,7 +73,7 @@ internal static class InputInjectionService
         throw new InvalidOperationException("Could not open clipboard after 10 attempts");
     }
 
-    private static void SimulateCtrlV()
+    private static uint SimulateCtrlV()
     {
         var inputs = new NativeMethods.INPUT[]
         {
@@ -69,7 +83,15 @@ internal static class InputInjectionService
             MakeVirtualKey(0xA2, keyUp: true),   // LCtrl up
         };
 
-        NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
+        return NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
+    }
+
+    private static void KeybdCtrlV()
+    {
+        NativeMethods.keybd_event(0xA2, 0, 0, UIntPtr.Zero);                 // LCtrl down
+        NativeMethods.keybd_event(0x56, 0, 0, UIntPtr.Zero);                 // V down
+        NativeMethods.keybd_event(0x56, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // V up
+        NativeMethods.keybd_event(0xA2, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // LCtrl up
     }
 
     private static void ReleaseModifiers()

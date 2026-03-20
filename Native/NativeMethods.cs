@@ -120,4 +120,9 @@ internal static class NativeMethods
 
     [DllImport("kernel32.dll")]
     public static extern uint GetCurrentThreadId();
+
+    public const uint KEYEVENTF_KU = 0x0002; // KEYEVENTF_KEYUP for keybd_event
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 }
