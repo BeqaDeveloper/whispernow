@@ -18,29 +18,16 @@ internal static class InputInjectionService
     {
         SetClipboardText(text);
 
-        var currentFg = NativeMethods.GetForegroundWindow();
-        Log.Info($"Paste: target=0x{targetWindow:X}, currentFg=0x{currentFg:X}, same={currentFg == targetWindow}");
-
-        if (targetWindow != IntPtr.Zero && currentFg != targetWindow)
-        {
-            bool ok = NativeMethods.SetForegroundWindow(targetWindow);
-            Log.Info($"SetForegroundWindow={ok}");
-            Thread.Sleep(50);
-        }
+        if (targetWindow != IntPtr.Zero && NativeMethods.GetForegroundWindow() != targetWindow)
+            NativeMethods.SetForegroundWindow(targetWindow);
 
         ReleaseModifiers();
-        Thread.Sleep(40);
+        Thread.Sleep(30);
 
-        // Try Ctrl+V via SendInput
-        uint sent = SimulateCtrlV();
-        Log.Info($"SendInput returned {sent} (expected 4)");
-
-        // If SendInput didn't inject all 4 events, fall back to keybd_event
-        if (sent < 4)
-        {
-            Log.Info("Falling back to keybd_event");
-            KeybdCtrlV();
-        }
+        NativeMethods.keybd_event(0xA2, 0, 0, UIntPtr.Zero);                                // LCtrl down
+        NativeMethods.keybd_event(0x56, 0, 0, UIntPtr.Zero);                                // V down
+        NativeMethods.keybd_event(0x56, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);       // V up
+        NativeMethods.keybd_event(0xA2, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);       // LCtrl up
     }
 
     private static void SetClipboardText(string text)
@@ -73,52 +60,13 @@ internal static class InputInjectionService
         throw new InvalidOperationException("Could not open clipboard after 10 attempts");
     }
 
-    private static uint SimulateCtrlV()
-    {
-        var inputs = new NativeMethods.INPUT[]
-        {
-            MakeVirtualKey(0xA2, keyUp: false),  // LCtrl down
-            MakeVirtualKey(0x56, keyUp: false),  // V down
-            MakeVirtualKey(0x56, keyUp: true),   // V up
-            MakeVirtualKey(0xA2, keyUp: true),   // LCtrl up
-        };
-
-        return NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
-    }
-
-    private static void KeybdCtrlV()
-    {
-        NativeMethods.keybd_event(0xA2, 0, 0, UIntPtr.Zero);                 // LCtrl down
-        NativeMethods.keybd_event(0x56, 0, 0, UIntPtr.Zero);                 // V down
-        NativeMethods.keybd_event(0x56, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // V up
-        NativeMethods.keybd_event(0xA2, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // LCtrl up
-    }
-
     private static void ReleaseModifiers()
     {
-        var releases = new[]
-        {
-            MakeVirtualKey(NativeMethods.VK_LCONTROL, keyUp: true),
-            MakeVirtualKey(NativeMethods.VK_RCONTROL, keyUp: true),
-            MakeVirtualKey(NativeMethods.VK_LMENU, keyUp: true),
-            MakeVirtualKey(NativeMethods.VK_RMENU, keyUp: true),
-            MakeVirtualKey(NativeMethods.VK_LSHIFT, keyUp: true),
-            MakeVirtualKey(NativeMethods.VK_RSHIFT, keyUp: true),
-        };
-
-        NativeMethods.SendInput((uint)releases.Length, releases, Marshal.SizeOf<NativeMethods.INPUT>());
+        NativeMethods.keybd_event(0xA2, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // LCtrl
+        NativeMethods.keybd_event(0xA3, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // RCtrl
+        NativeMethods.keybd_event(0xA4, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // LAlt
+        NativeMethods.keybd_event(0xA5, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // RAlt
+        NativeMethods.keybd_event(0xA0, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // LShift
+        NativeMethods.keybd_event(0xA1, 0, NativeMethods.KEYEVENTF_KU, UIntPtr.Zero);  // RShift
     }
-
-    private static NativeMethods.INPUT MakeVirtualKey(int vk, bool keyUp) => new()
-    {
-        type = NativeMethods.INPUT_KEYBOARD,
-        union = new NativeMethods.INPUTUNION
-        {
-            ki = new NativeMethods.KEYBDINPUT
-            {
-                wVk = (ushort)vk,
-                dwFlags = keyUp ? NativeMethods.KEYEVENTF_KEYUP : 0,
-            }
-        }
-    };
 }

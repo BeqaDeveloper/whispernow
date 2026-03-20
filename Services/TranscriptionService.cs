@@ -27,7 +27,7 @@ internal sealed class TranscriptionService : IDisposable
         _factory = WhisperFactory.FromPath(modelPath);
         _processor = _factory.CreateBuilder()
             .WithLanguage("en")
-            .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))
+            .WithThreads(Math.Max(1, Environment.ProcessorCount - 2))
             .WithPrompt(
                 "SOLID principles, single responsibility, open-closed, Liskov substitution, " +
                 "interface segregation, dependency inversion, " +
