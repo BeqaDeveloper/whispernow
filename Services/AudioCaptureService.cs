@@ -1,3 +1,4 @@
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
@@ -8,26 +9,43 @@ internal sealed class AudioCaptureService : IDisposable
     private const int TargetSampleRate = 16000;
 
     private WasapiLoopbackCapture? _capture;
-    private MemoryStream? _buffer;
     private WaveFormat? _captureFormat;
+    private MemoryStream? _buffer;
     private readonly object _lock = new();
-    private int _dataChunks;
+    private bool _initialized;
+
+    public void EnsureInitialized()
+    {
+        lock (_lock)
+        {
+            if (_initialized) return;
+            _capture = new WasapiLoopbackCapture();
+            _captureFormat = _capture.WaveFormat;
+            _capture.DataAvailable += OnDataAvailable;
+            _capture.RecordingStopped += OnRecordingStopped;
+            _initialized = true;
+            Log.Info($"WASAPI pre-initialized: {_captureFormat.SampleRate}Hz, {_captureFormat.Channels}ch");
+        }
+    }
 
     public void StartCapture()
     {
         lock (_lock)
         {
+            EnsureInitialized();
             _buffer?.Dispose();
             _buffer = new MemoryStream();
-            _dataChunks = 0;
 
-            _capture?.Dispose();
-            _capture = new WasapiLoopbackCapture();
-            _captureFormat = _capture.WaveFormat;
-            Log.Info($"Audio capture format: {_captureFormat.SampleRate}Hz, {_captureFormat.Channels}ch, {_captureFormat.BitsPerSample}bit");
-            _capture.DataAvailable += OnDataAvailable;
-            _capture.StartRecording();
-            Log.Info("Audio capture STARTED");
+            try
+            {
+                _capture!.StartRecording();
+            }
+            catch (InvalidOperationException)
+            {
+                // Device may have changed, reinitialize
+                ReinitDevice();
+                _capture!.StartRecording();
+            }
         }
     }
 
@@ -35,15 +53,8 @@ internal sealed class AudioCaptureService : IDisposable
     {
         lock (_lock)
         {
-            if (_capture is { CaptureState: NAudio.CoreAudioApi.CaptureState.Capturing })
-            {
+            if (_capture is { CaptureState: CaptureState.Capturing })
                 _capture.StopRecording();
-                Log.Info($"Audio capture STOPPED — received {_dataChunks} data chunks, buffer={_buffer?.Length ?? 0} bytes");
-            }
-            else
-            {
-                Log.Info($"StopCapture called but state={_capture?.CaptureState}");
-            }
         }
     }
 
@@ -52,19 +63,13 @@ internal sealed class AudioCaptureService : IDisposable
         lock (_lock)
         {
             if (_buffer == null || _captureFormat == null || _buffer.Length == 0)
-            {
-                Log.Info("GetCapturedSamples: no data (buffer empty or null)");
                 return [];
-            }
 
             var rawData = _buffer.ToArray();
             _buffer.Dispose();
             _buffer = null;
 
-            Log.Info($"Converting {rawData.Length} bytes from {_captureFormat.SampleRate}Hz to 16kHz mono...");
-            var samples = ConvertTo16kMono(rawData, _captureFormat);
-            Log.Info($"Conversion done: {samples.Length} float samples ({samples.Length / 16000.0:F1}s at 16kHz)");
-            return samples;
+            return ConvertTo16kMono(rawData, _captureFormat);
         }
     }
 
@@ -72,9 +77,24 @@ internal sealed class AudioCaptureService : IDisposable
     {
         lock (_lock)
         {
-            _dataChunks++;
             _buffer?.Write(e.Buffer, 0, e.BytesRecorded);
         }
+    }
+
+    private void OnRecordingStopped(object? sender, StoppedEventArgs e)
+    {
+        if (e.Exception != null)
+            Log.Error($"Recording error: {e.Exception.Message}");
+    }
+
+    private void ReinitDevice()
+    {
+        _capture?.Dispose();
+        _capture = new WasapiLoopbackCapture();
+        _captureFormat = _capture.WaveFormat;
+        _capture.DataAvailable += OnDataAvailable;
+        _capture.RecordingStopped += OnRecordingStopped;
+        Log.Info("WASAPI re-initialized (device changed)");
     }
 
     private static float[] ConvertTo16kMono(byte[] rawData, WaveFormat sourceFormat)
@@ -88,16 +108,24 @@ internal sealed class AudioCaptureService : IDisposable
         if (pipeline.WaveFormat.SampleRate != TargetSampleRate)
             pipeline = new WdlResamplingSampleProvider(pipeline, TargetSampleRate);
 
-        var result = new List<float>();
-        var readBuffer = new float[4096];
+        // Pre-allocate based on expected output size
+        int totalSourceSamples = rawData.Length / (sourceFormat.BitsPerSample / 8);
+        int monoSamples = totalSourceSamples / sourceFormat.Channels;
+        int estimatedOutput = (int)((long)monoSamples * TargetSampleRate / sourceFormat.SampleRate) + 1024;
+
+        var result = new float[estimatedOutput];
+        int offset = 0;
         int samplesRead;
-        while ((samplesRead = pipeline.Read(readBuffer, 0, readBuffer.Length)) > 0)
+        while ((samplesRead = pipeline.Read(result, offset, Math.Min(8192, result.Length - offset))) > 0)
         {
-            for (int i = 0; i < samplesRead; i++)
-                result.Add(readBuffer[i]);
+            offset += samplesRead;
+            if (offset >= result.Length)
+                break;
         }
 
-        return result.ToArray();
+        if (offset < result.Length)
+            Array.Resize(ref result, offset);
+        return result;
     }
 
     public void Dispose()

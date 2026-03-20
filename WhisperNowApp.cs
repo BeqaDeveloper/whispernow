@@ -9,7 +9,13 @@ internal sealed class WhisperNowApp : ApplicationContext
     private readonly HotkeyService _hotkeyService;
     private readonly AudioCaptureService _audioService;
     private readonly TranscriptionService _transcriptionService;
+    private readonly OverlayForm _overlay;
+    private readonly Icon _idleIcon;
+    private readonly Icon _recordingIcon;
+    private readonly Icon _processingIcon;
+    private readonly Icon _disabledIcon;
     private bool _isRecording;
+    private bool _serviceEnabled = true;
 
     public WhisperNowApp(TranscriptionService transcriptionService)
     {
@@ -17,10 +23,18 @@ internal sealed class WhisperNowApp : ApplicationContext
         _audioService = new AudioCaptureService();
         _hotkeyService = new HotkeyService();
 
+        _idleIcon = CreateCircleIcon(Color.FromArgb(60, 180, 75));
+        _recordingIcon = CreateCircleIcon(Color.FromArgb(220, 40, 40));
+        _processingIcon = CreateCircleIcon(Color.FromArgb(255, 165, 0));
+        _disabledIcon = CreateCircleIcon(Color.FromArgb(120, 120, 120));
+
+        _overlay = new OverlayForm();
+        _overlay.Show();
+
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
-            Text = "WhisperNow — Ready (hold LCtrl+LAlt)",
+            Icon = _idleIcon,
+            Text = "WhisperNow — Ready",
             Visible = true,
             ContextMenuStrip = BuildMenu()
         };
@@ -29,14 +43,19 @@ internal sealed class WhisperNowApp : ApplicationContext
         _hotkeyService.Deactivated += OnDeactivated;
         _hotkeyService.Start();
 
-        Log.Info("WhisperNow started — waiting for LCtrl+LAlt");
+        // Pre-initialize audio device so first recording is instant
+        _audioService.EnsureInitialized();
+
+        Log.Info("WhisperNow started");
     }
 
     private void OnActivated()
     {
-        if (_isRecording) return;
+        if (!_serviceEnabled || _isRecording) return;
         _isRecording = true;
+        _trayIcon.Icon = _recordingIcon;
         _trayIcon.Text = "WhisperNow — Recording...";
+        _overlay.SetState(OverlayState.Recording);
         _audioService.StartCapture();
         Log.Info("Recording started");
     }
@@ -48,12 +67,12 @@ internal sealed class WhisperNowApp : ApplicationContext
         _audioService.StopCapture();
         Log.Info("Recording stopped");
 
-        // Clear clipboard immediately so a quick Ctrl+V won't paste stale text
         InputInjectionService.ClearClipboard();
 
-        // Remember where the user is RIGHT NOW (before any async gap)
         var targetWindow = NativeMethods.GetForegroundWindow();
+        _trayIcon.Icon = _processingIcon;
         _trayIcon.Text = "WhisperNow — Transcribing...";
+        _overlay.SetState(OverlayState.Transcribing);
 
         try
         {
@@ -81,19 +100,64 @@ internal sealed class WhisperNowApp : ApplicationContext
         }
         finally
         {
-            _trayIcon.Text = "WhisperNow — Ready (hold LCtrl+LAlt)";
+            _trayIcon.Icon = _serviceEnabled ? _idleIcon : _disabledIcon;
+            _trayIcon.Text = _serviceEnabled ? "WhisperNow — Ready" : "WhisperNow — Paused";
+            _overlay.SetState(_serviceEnabled ? OverlayState.Ready : OverlayState.Disabled);
         }
     }
 
     private ContextMenuStrip BuildMenu()
     {
         var menu = new ContextMenuStrip();
+
+        var toggleService = new ToolStripMenuItem("Pause service");
+        toggleService.Click += (_, _) =>
+        {
+            _serviceEnabled = !_serviceEnabled;
+            toggleService.Text = _serviceEnabled ? "Pause service" : "Resume service";
+            _trayIcon.Icon = _serviceEnabled ? _idleIcon : _disabledIcon;
+            _trayIcon.Text = _serviceEnabled ? "WhisperNow — Ready" : "WhisperNow — Paused";
+            _overlay.SetState(_serviceEnabled ? OverlayState.Ready : OverlayState.Disabled);
+            Log.Info($"Service {(_serviceEnabled ? "resumed" : "paused")}");
+        };
+        menu.Items.Add(toggleService);
+
+        var toggleOverlay = new ToolStripMenuItem("Hide overlay");
+        toggleOverlay.Click += (_, _) =>
+        {
+            if (_overlay.Visible)
+            {
+                _overlay.Hide();
+                toggleOverlay.Text = "Show overlay";
+            }
+            else
+            {
+                _overlay.Show();
+                toggleOverlay.Text = "Hide overlay";
+            }
+        };
+        menu.Items.Add(toggleOverlay);
+
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) =>
         {
             _trayIcon.Visible = false;
+            _overlay.Close();
             ExitThread();
         });
+
         return menu;
+    }
+
+    private static Icon CreateCircleIcon(Color color)
+    {
+        using var bmp = new Bitmap(16, 16);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        g.Clear(Color.Transparent);
+        using var brush = new SolidBrush(color);
+        g.FillEllipse(brush, 1, 1, 14, 14);
+        return Icon.FromHandle(bmp.GetHicon());
     }
 
     protected override void Dispose(bool disposing)
@@ -104,6 +168,11 @@ internal sealed class WhisperNowApp : ApplicationContext
             _audioService.Dispose();
             _transcriptionService.Dispose();
             _trayIcon.Dispose();
+            _overlay.Dispose();
+            _idleIcon.Dispose();
+            _recordingIcon.Dispose();
+            _processingIcon.Dispose();
+            _disabledIcon.Dispose();
         }
         base.Dispose(disposing);
     }

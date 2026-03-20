@@ -1,3 +1,4 @@
+using System.Runtime;
 using System.Text;
 using Whisper.net;
 using Whisper.net.Ggml;
@@ -15,7 +16,7 @@ internal sealed class TranscriptionService : IDisposable
 
         if (!File.Exists(modelPath))
         {
-            Log.Info("Downloading ggml-small.en model (~460 MB) — this is one-time...");
+            Log.Info("Downloading ggml-small.en model (~460 MB) — one-time...");
             using var modelStream = await WhisperGgmlDownloader.Default
                 .GetGgmlModelAsync(GgmlType.SmallEn);
             Directory.CreateDirectory(modelsDirectory);
@@ -27,7 +28,7 @@ internal sealed class TranscriptionService : IDisposable
         _factory = WhisperFactory.FromPath(modelPath);
         _processor = _factory.CreateBuilder()
             .WithLanguage("en")
-            .WithThreads(Math.Max(1, Environment.ProcessorCount - 2))
+            .WithThreads(8)
             .WithPrompt(
                 "SOLID principles, single responsibility, open-closed, Liskov substitution, " +
                 "interface segregation, dependency inversion, " +
@@ -40,6 +41,19 @@ internal sealed class TranscriptionService : IDisposable
                 "JavaScript, TypeScript, Python, React, Angular, Node.js, " +
                 "microservice, repository pattern, unit test, integration test")
             .Build();
+
+        await WarmUpAsync();
+    }
+
+    /// <summary>
+    /// Runs a tiny dummy transcription so Whisper's internal buffers,
+    /// thread pool, and CPU caches are all hot for the first real call.
+    /// </summary>
+    private async Task WarmUpAsync()
+    {
+        var silence = new float[16000]; // 1 second of silence
+        await foreach (var _ in _processor!.ProcessAsync(silence)) { }
+        Log.Info("Whisper warm-up complete");
     }
 
     public async Task<string> TranscribeAsync(float[] samples)
@@ -47,47 +61,36 @@ internal sealed class TranscriptionService : IDisposable
         if (_processor == null)
             throw new InvalidOperationException("TranscriptionService not initialized.");
 
-        using var wavStream = BuildWavStream(samples);
-        var segments = new StringBuilder();
-
-        await foreach (var segment in _processor.ProcessAsync(wavStream))
+        // Suppress GC during inference to avoid random pauses
+        bool noGc = false;
+        try
         {
-            if (segments.Length > 0)
-                segments.Append(' ');
-            segments.Append(segment.Text.Trim());
+            if (GC.TryStartNoGCRegion(50 * 1024 * 1024)) // 50 MB headroom
+                noGc = true;
         }
+        catch { /* ignore if already in no-gc region */ }
 
-        return segments.ToString().Trim();
-    }
+        try
+        {
+            var segments = new StringBuilder();
 
-    private static MemoryStream BuildWavStream(float[] samples, int sampleRate = 16000)
-    {
-        const int bitsPerSample = 16;
-        int dataLength = samples.Length * sizeof(short);
+            await foreach (var segment in _processor.ProcessAsync(samples))
+            {
+                if (segments.Length > 0)
+                    segments.Append(' ');
+                segments.Append(segment.Text.Trim());
+            }
 
-        var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
-
-        writer.Write(Encoding.ASCII.GetBytes("RIFF"));
-        writer.Write(36 + dataLength);
-        writer.Write(Encoding.ASCII.GetBytes("WAVE"));
-
-        writer.Write(Encoding.ASCII.GetBytes("fmt "));
-        writer.Write(16);
-        writer.Write((short)1);
-        writer.Write((short)1);
-        writer.Write(sampleRate);
-        writer.Write(sampleRate * bitsPerSample / 8);
-        writer.Write((short)(bitsPerSample / 8));
-        writer.Write((short)bitsPerSample);
-
-        writer.Write(Encoding.ASCII.GetBytes("data"));
-        writer.Write(dataLength);
-        foreach (var sample in samples)
-            writer.Write((short)(Math.Clamp(sample, -1f, 1f) * short.MaxValue));
-
-        stream.Position = 0;
-        return stream;
+            return segments.ToString().Trim();
+        }
+        finally
+        {
+            if (noGc)
+            {
+                try { GCSettings.LatencyMode = GCLatencyMode.Interactive; }
+                catch { /* already ended */ }
+            }
+        }
     }
 
     public void Dispose()

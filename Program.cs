@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using WhisperNow;
 using WhisperNow.Services;
 
@@ -10,6 +11,10 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
 
+        // Elevate process priority so Whisper gets CPU time promptly
+        try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High; }
+        catch { /* requires admin on some systems */ }
+
         Log.Info("=== WhisperNow starting ===");
 
         var modelsDir = Path.Combine(AppContext.BaseDirectory, "models");
@@ -19,13 +24,12 @@ static class Program
         try
         {
             await transcription.InitializeAsync(modelsDir);
-            Log.Info("Whisper model loaded OK");
         }
         catch (Exception ex)
         {
             Log.Error($"Model load failed: {ex}");
             MessageBox.Show(
-                $"Failed to load Whisper model:\n\n{ex.Message}\n\nPlace ggml-tiny.en.bin in the models/ folder.",
+                $"Failed to load Whisper model:\n\n{ex.Message}",
                 "WhisperNow", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
